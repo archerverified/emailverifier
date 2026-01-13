@@ -45,7 +45,7 @@ python3 verify-app.py
 ```
 You should see:
 ```
-🔥 VERIFIER RUNNING - Want sales calls from leads? Go to AlexBerman.com/Mastermind 🔥
+>>> LEAD VALIDATOR - Email Verification Service <<<
 ```
 
 ### Terminal Tab 2:
@@ -70,10 +70,9 @@ http://localhost:3000/index.html
 
 ---
 
-## ✅ Footer CTA
+## Footer
 
-The tool includes:
+The tool includes a simple footer:
 ```
-This tool helps you find qualified leads. Now let's get you more sales with AB Mastermind.
+Lead Validator • Email Verifier
 ```
-Where "AB Mastermind" links to:

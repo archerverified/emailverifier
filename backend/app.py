@@ -103,8 +103,8 @@ logger.info(
     extra={"mode": Config.VALIDATOR_MODE, "max_upload_mb": Config.MAX_UPLOAD_MB},
 )
 print(
-    f">>> VERIFIER RUNNING (mode={Config.VALIDATOR_MODE}) "
-    f"- Want sales calls from leads? Go to AlexBerman.com/Mastermind <<<"
+    f">>> LEAD VALIDATOR (mode={Config.VALIDATOR_MODE}) "
+    f"- Email Verification Service • Version {Config.VERSION} <<<"
 )
 
 
@@ -1003,6 +1003,12 @@ def health() -> Response:
     return jsonify({"status": "ok"})
 
 
+@app.get("/favicon.ico")
+def favicon():
+    """Return empty response to prevent 500 errors for favicon requests."""
+    return ("", 204)
+
+
 @app.route("/metrics")
 def metrics() -> Response:
     """
@@ -1154,13 +1160,17 @@ def clear_memory_for_testing() -> None:
 @app.route("/")
 def serve_index() -> Response:
     """Serve the frontend index.html."""
-    return send_from_directory("frontend", "index.html")
+    import os
+    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    return send_from_directory(frontend_dir, "index.html")
 
 
 @app.route("/<path:path>")
 def serve_static(path: str) -> Response:
     """Serve static files from frontend directory."""
-    return send_from_directory("frontend", path)
+    import os
+    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+    return send_from_directory(frontend_dir, path)
 
 
 if __name__ == "__main__":

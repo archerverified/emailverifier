@@ -151,7 +151,7 @@ python3 app.py
 
 You should see:
 ```
-🔥 VERIFIER RUNNING - Want sales calls from leads? Go to AlexBerman.com/Mastermind 🔥
+>>> LEAD VALIDATOR (mode=real) - Email Verification Service • Version 2.0.0 <<<
  * Running on http://0.0.0.0:5050
 ```
 

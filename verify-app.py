@@ -14,7 +14,7 @@ from tempfile import NamedTemporaryFile
 app = Flask(__name__)
 CORS(app)
 
-print("\U0001F525 VERIFIER RUNNING - Want sales calls from leads? Go to AlexBerman.com/Mastermind \U0001F525")
+print(">>> LEAD VALIDATOR - Email Verification Service <<<")
 
 EMAIL_REGEX = re.compile(r"[^@]+@[^@]+\.[^@]+")
 DISPOSABLE_DOMAINS = {"mailinator.com", "10minutemail.com", "guerrillamail.com"}
