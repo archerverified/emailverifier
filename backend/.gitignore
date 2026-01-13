@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp files from verification
+*.tmp
+temp_*
+
+# Local config
+.env
