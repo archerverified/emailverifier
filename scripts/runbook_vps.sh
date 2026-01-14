@@ -43,7 +43,7 @@ echo "   Done."
 # Ensure data directories exist
 echo ""
 echo "2. Creating data directories..."
-mkdir -p data/storage data/caddy/data data/caddy/config
+mkdir -p data/storage data/caddy/data data/caddy/config data/redis
 echo "   Done."
 
 # Generate API key
