@@ -1,0 +1,80 @@
+# =============================================================================
+# Caddy Configuration for Lead Validator API
+# =============================================================================
+# Caddy automatically provisions and renews Let's Encrypt certificates.
+# Set DOMAIN environment variable to your domain name.
+
+validator.2ndimpression.co {
+    # Handle large file uploads (match backend limit)
+    request_body {
+        max_size 30MB
+    }
+
+    # Security headers
+    header {
+        # HSTS - Force HTTPS for 1 year
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+        # Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+
+        # Prevent clickjacking
+        X-Frame-Options "DENY"
+
+        # XSS protection (legacy but still useful)
+        X-XSS-Protection "1; mode=block"
+
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+
+        # Remove server identification
+        -Server
+    }
+
+    # Request logging (JSON format for parsing)
+    log {
+        output file /data/access.log {
+            roll_size 100mb
+            roll_keep 5
+            roll_keep_for 720h
+        }
+        format json
+    }
+
+    # Serve static frontend (SPA) from mounted ./frontend directory
+    root * /srv/frontend
+    encode zstd gzip
+
+    # Never 500 on favicon
+    handle /favicon.ico {
+        respond "" 204
+    }
+
+    # Proxy API routes to backend (keep API paths unchanged)
+    @api path /verify /progress /log /cancel /download /jobs* /metrics /schema /health
+    handle @api {
+        reverse_proxy backend:5050
+    }
+
+    # Everything else: serve static files; fallback to index.html (SPA routes)
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Localhost fallback (development / diagnostics)
+:80 {
+    root * /srv/frontend
+    handle /favicon.ico {
+        respond "" 204
+    }
+    @api path /verify /progress /log /cancel /download /jobs* /metrics /schema /health
+    handle @api {
+        reverse_proxy backend:5050
+    }
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}

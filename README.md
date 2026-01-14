@@ -257,10 +257,15 @@ Each email is classified as:
 
 Reasons include:
 - `smtp_ok` - Valid email confirmed via SMTP
-- `smtp_timeout` - Could not connect to mail server
-- `smtp_reject` - Mailbox does not exist
+- `smtp_timeout` - Could not connect to mail server (single attempt)
+- `timeout_after_retry` - Could not connect after retry attempts
+- `temp_fail_4xx` - Temporary SMTP failure (e.g., `temp_fail_450_after_retry`)
+- `connection_refused` - Mail server refused connection
+- `connection_reset` - Connection was reset by server
+- `smtp_reject_5xx` - Mailbox does not exist (e.g., `smtp_reject_550`)
 - `domain_accepts_all` - Catch-all domain (can't verify specific mailbox)
 - `no_mx` - Domain has no mail servers
+- `no_mx_dns_timeout` - DNS query timed out
 - `bad_syntax` - Invalid email format
 - `disposable_domain` - Temporary email service
 - `role_based` - Generic email (info@, support@, etc.)
@@ -461,6 +466,26 @@ All configuration is done via environment variables:
 | `MAX_CONCURRENT_JOBS` | `3` | Maximum simultaneous verification jobs (1-20) |
 | `JOB_STALL_TIMEOUT_MINUTES` | `10` | Mark jobs as failed if no activity for this long |
 | `JOB_HEARTBEAT_INTERVAL_ROWS` | `10` | Update heartbeat every N rows processed |
+
+### SMTP/DNS Configuration
+
+These settings control email verification accuracy and performance:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SMTP_TIMEOUT_SECONDS` | `20` | SMTP connection timeout per attempt (5-120) |
+| `DNS_TIMEOUT_SECONDS` | `5` | DNS query timeout (1-30) |
+| `SMTP_RETRIES` | `1` | Number of retries on timeout/4xx temporary failures (0-5) |
+| `RETRY_BACKOFF_MS` | `900` | Retry backoff with ±300ms jitter (100-10000) |
+| `SMTP_GLOBAL_WORKERS` | `15` | Max concurrent SMTP checks across all jobs (1-100) |
+| `SMTP_PER_DOMAIN_LIMIT` | `2` | Max concurrent SMTP checks per domain (1-20) |
+| `DNS_CACHE_TTL_MINUTES` | `30` | DNS/MX cache lifetime in minutes (1-120) |
+
+**Tuning tips:**
+- Increase `SMTP_TIMEOUT_SECONDS` for slow mail servers (reduces false "risky" outcomes)
+- Increase `SMTP_RETRIES` to 2-3 for higher accuracy (but slower)
+- Decrease `SMTP_PER_DOMAIN_LIMIT` to 1 if you hit rate-limiting on specific domains
+- Increase `SMTP_GLOBAL_WORKERS` for faster verification on powerful machines
 
 ### Examples
 

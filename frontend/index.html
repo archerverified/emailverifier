@@ -85,6 +85,30 @@
       ? 'http://localhost:5050'
       : window.location.origin;
 
+    // ============================================
+    // API AUTH (for VPS deployment with APP_API_KEY)
+    // ============================================
+    // In production, POST /verify, POST /cancel, DELETE /jobs/<id> require X-API-Key.
+    // We store the key locally in the browser so the same-origin UI can call the API.
+    const API_KEY_STORAGE_KEY = 'lead-validator-api-key';
+    function getApiKey() {
+      return (localStorage.getItem(API_KEY_STORAGE_KEY) || '').trim();
+    }
+    function getApiAuthHeaders() {
+      const key = getApiKey();
+      return key ? { 'X-API-Key': key } : {};
+    }
+    // Prompt once in production if key is missing (so the UI can call protected endpoints)
+    (function ensureApiKeyForUi() {
+      const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+      if (isLocal) return;
+      if (getApiKey()) return;
+      const entered = window.prompt('Enter API key for Lead Validator (stored locally in this browser):');
+      if (entered && entered.trim()) {
+        localStorage.setItem(API_KEY_STORAGE_KEY, entered.trim());
+      }
+    })();
+
     // DOM Elements
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
@@ -351,6 +375,7 @@
 
       fetch(`${API_BASE_URL}/verify`, {
         method: 'POST',
+        headers: getApiAuthHeaders(),
         body: formData
       })
       .then(res => {
@@ -461,7 +486,7 @@
 
       cancelBtn.onclick = () => {
         canceled = true;
-        fetch(`${API_BASE_URL}/cancel?job_id=${job_id}`, { method: 'POST' })
+        fetch(`${API_BASE_URL}/cancel?job_id=${job_id}`, { method: 'POST', headers: getApiAuthHeaders() })
           .catch(() => {});
         status.innerText = 'Canceled';
         status.style.color = 'var(--color-danger)';
@@ -470,7 +495,7 @@
 
       closeBtn.onclick = () => {
         canceled = true;
-        fetch(`${API_BASE_URL}/cancel?job_id=${job_id}`, { method: 'POST' })
+        fetch(`${API_BASE_URL}/cancel?job_id=${job_id}`, { method: 'POST', headers: getApiAuthHeaders() })
           .catch(() => {});
         removeJob();
       };
@@ -701,7 +726,7 @@
         return;
       }
 
-      fetch(`${API_BASE_URL}/jobs/${jobId}`, { method: 'DELETE' })
+      fetch(`${API_BASE_URL}/jobs/${jobId}`, { method: 'DELETE', headers: getApiAuthHeaders() })
         .then(res => {
           if (res.ok) {
             // Remove from DOM

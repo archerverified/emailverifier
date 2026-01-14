@@ -18,6 +18,12 @@ build/
 *.swo
 *~
 
+# Cursor / local tooling
+.cursor/
+
+# Claude local skills (keep agents if you want them versioned)
+.claude/skills/
+
 # OS
 .DS_Store
 Thumbs.db

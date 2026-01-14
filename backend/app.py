@@ -5,8 +5,10 @@ import csv
 import io
 import json
 import logging
+import random
 import re
 import smtplib
+import socket
 import sys
 import threading
 import time
@@ -14,6 +16,7 @@ import uuid
 from collections import Counter
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from functools import wraps
 from tempfile import NamedTemporaryFile
 
 import dns.resolver
@@ -22,6 +25,8 @@ from flask_cors import CORS
 
 import csv_utils
 import db
+import dns_cache
+import rate_limiter
 import storage
 from config import Config
 
@@ -96,6 +101,24 @@ db.init_db()
 cleanup_count = db.cleanup_old_jobs(Config.RETENTION_DAYS, Config.MAX_JOBS)
 if cleanup_count > 0:
     logger.info(f"Cleaned up {cleanup_count} old jobs on startup")
+
+# Initialize DNS cache (process-lifetime with TTL)
+mx_cache = dns_cache.DNSCache(Config.DNS_CACHE_TTL_MINUTES)
+
+# SMTP concurrency control (semaphores)
+smtp_global_semaphore = threading.Semaphore(Config.SMTP_GLOBAL_WORKERS)
+domain_semaphores: dict[str, threading.Semaphore] = {}
+domain_semaphores_lock = threading.Lock()
+
+
+def get_domain_semaphore(domain: str) -> threading.Semaphore:
+    """Get or create a semaphore for a specific domain (per-domain concurrency limit)."""
+    domain_lower = domain.lower()
+    with domain_semaphores_lock:
+        if domain_lower not in domain_semaphores:
+            domain_semaphores[domain_lower] = threading.Semaphore(Config.SMTP_PER_DOMAIN_LIMIT)
+        return domain_semaphores[domain_lower]
+
 
 # Startup message
 logger.info(
@@ -226,6 +249,92 @@ def error_response(
     return jsonify(payload), status_code
 
 
+# ============================================================================
+# API Key Authentication Decorator
+# ============================================================================
+
+
+def require_api_key(f):
+    """
+    Decorator to require API key for protected endpoints.
+    If APP_API_KEY is not set, allows all requests (backward compat for dev).
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # If no API key configured, allow all requests (dev mode)
+        if not Config.APP_API_KEY:
+            return f(*args, **kwargs)
+
+        provided_key = request.headers.get("X-API-Key", "")
+        if provided_key != Config.APP_API_KEY:
+            logger.warning(
+                "Unauthorized API access attempt",
+                extra={"job_id": "auth", "mode": "rejected"},
+            )
+            return error_response(
+                "UNAUTHORIZED",
+                "Invalid or missing API key",
+                {"hint": "Provide valid X-API-Key header"},
+                401,
+            )
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+# ============================================================================
+# Rate Limiting Decorator
+# ============================================================================
+
+
+def rate_limit(f):
+    """
+    Decorator to apply rate limiting to endpoints.
+    Uses dual-strategy: per-IP and per-API-key limits.
+    Disabled in testing mode.
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Disable rate limiting in testing mode
+        if Config.TESTING:
+            return f(*args, **kwargs)
+
+        # Get client IP (handle proxies)
+        client_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+        if client_ip and "," in client_ip:
+            client_ip = client_ip.split(",")[0].strip()
+
+        # Get API key if provided
+        api_key = request.headers.get("X-API-Key", None)
+
+        # Check rate limit
+        allowed, reason, details = rate_limiter.rate_limiter.is_allowed(
+            ip=client_ip or "unknown",
+            api_key=api_key,
+            ip_limit=Config.RATE_LIMIT_IP_PER_MINUTE,
+            key_limit=Config.RATE_LIMIT_KEY_PER_MINUTE,
+            window=60,
+        )
+
+        if not allowed:
+            logger.warning(
+                "Rate limit exceeded",
+                extra={"job_id": "rate_limit", "mode": reason},
+            )
+            return error_response(
+                "RATE_LIMIT_EXCEEDED",
+                reason,
+                details,
+                429,
+            )
+
+        return f(*args, **kwargs)
+
+    return decorated
+
+
 def validate_csv_content(content: str) -> tuple[bool, str]:
     """
     Validate CSV content for safety.
@@ -293,9 +402,9 @@ def calculate_score_and_risks(email: str, status: str, reason: str) -> tuple[int
     # Critical failures - score 0
     if reason in ("bad_syntax", "empty_email"):
         return 0, ["invalid_syntax"]
-    if reason == "no_mx":
+    if reason in ("no_mx", "no_mx_dns_timeout"):
         return 0, ["no_mail_server"]
-    if reason == "smtp_reject":
+    if reason.startswith("smtp_reject"):
         return 0, ["mailbox_not_found"]
     if reason == "disposable_domain":
         return 0, ["disposable_provider"]
@@ -305,15 +414,24 @@ def calculate_score_and_risks(email: str, status: str, reason: str) -> tuple[int
         score -= 25
         risk_factors.append("role_based_email")
 
-    # SMTP issues
-    if reason == "smtp_timeout":
+    # SMTP timeout issues (including retry-enhanced reasons)
+    if reason in ("smtp_timeout", "timeout_after_retry"):
         score -= 25
         risk_factors.append("smtp_unreachable")
-    if reason.startswith("smtp_soft_fail"):
+
+    # Connection errors
+    if reason in ("connection_refused", "connection_reset"):
+        score -= 30
+        risk_factors.append("smtp_connection_failed")
+
+    # Temporary SMTP failures (4xx codes)
+    if reason.startswith("smtp_soft_fail") or reason.startswith("temp_fail_"):
         score -= 25
         risk_factors.append("temporary_smtp_failure")
+
+    # Other SMTP errors
     if reason.startswith("smtp_") and reason not in ("smtp_ok", "smtp_timeout"):
-        if "soft_fail" not in reason:
+        if "soft_fail" not in reason and "reject" not in reason:
             score -= 30
             risk_factors.append("smtp_error")
 
@@ -377,14 +495,124 @@ def check_email_mock(email: str) -> tuple[str, str, int, list[str]]:
     return "risky", "mock_risky", 60, ["unverifiable_domain"]
 
 
+def _jittered_backoff() -> float:
+    """Return backoff time with jitter (RETRY_BACKOFF_MS +/- 300ms)."""
+    base_ms = Config.RETRY_BACKOFF_MS
+    jitter_ms = random.randint(-300, 300)
+    return max(100, base_ms + jitter_ms) / 1000.0  # Convert to seconds, minimum 100ms
+
+
+def _single_smtp_check(email: str, mx_record: str, timeout: int) -> tuple[int | None, str]:
+    """
+    Single SMTP check attempt.
+    Returns (code, detail) where detail describes what happened.
+    """
+    try:
+        server = smtplib.SMTP(timeout=timeout)
+        server.connect(mx_record)
+        server.helo("example.com")
+        server.mail("verifier@example.com")
+        code, _ = server.rcpt(email)
+        server.quit()
+        return code, "success"
+    except (socket.timeout, TimeoutError):
+        return None, "timeout"
+    except ConnectionResetError:
+        return None, "connection_reset"
+    except ConnectionRefusedError:
+        return None, "connection_refused"
+    except OSError as e:
+        # Handle network-level errors (e.g., host unreachable)
+        return None, f"os_error_{type(e).__name__}"
+    except smtplib.SMTPException as e:
+        return None, f"smtp_exception_{type(e).__name__}"
+    except Exception as e:
+        return None, f"error_{type(e).__name__}"
+
+
+def _smtp_check_with_retry(email: str, mx_record: str) -> tuple[int | None, str]:
+    """
+    Perform SMTP check with retry on timeout/4xx temporary failures.
+    Returns (code, detailed_reason).
+    """
+    last_code: int | None = None
+    last_detail: str = "unknown"
+
+    for attempt in range(Config.SMTP_RETRIES + 1):
+        code, detail = _single_smtp_check(email, mx_record, Config.SMTP_TIMEOUT_SECONDS)
+
+        # Success - valid email
+        if code == 250:
+            return code, "smtp_ok"
+
+        # Hard reject (5xx user unknown) - don't retry
+        if code in (550, 551, 552, 553, 554):
+            return code, f"smtp_reject_{code}"
+
+        # Track last result for final reporting
+        last_code = code
+        last_detail = detail
+
+        # Check if we should retry
+        is_retryable = code is None or code in (  # Timeout or connection error
+            421,
+            450,
+            451,
+            452,
+        )  # Temporary 4xx failures
+
+        if is_retryable and attempt < Config.SMTP_RETRIES:
+            time.sleep(_jittered_backoff())
+            continue
+
+        # Last attempt or non-retryable - return result
+        break
+
+    # Determine final reason based on last result
+    if last_code is None:
+        # Connection/timeout failure
+        if last_detail == "timeout":
+            return None, "timeout_after_retry" if Config.SMTP_RETRIES > 0 else "smtp_timeout"
+        elif last_detail == "connection_refused":
+            return None, "connection_refused"
+        elif last_detail == "connection_reset":
+            return None, "connection_reset"
+        else:
+            return None, f"connection_error_{last_detail}"
+
+    if last_code in (421, 450, 451, 452):
+        suffix = "_after_retry" if Config.SMTP_RETRIES > 0 else ""
+        return last_code, f"temp_fail_{last_code}{suffix}"
+
+    # Other codes
+    return last_code, f"smtp_{last_code}"
+
+
+def _smtp_check_catch_all(mx_record: str, domain: str) -> bool:
+    """
+    Check if domain accepts all emails (catch-all).
+    Returns True if domain is catch-all, False otherwise.
+    """
+    try:
+        server = smtplib.SMTP(timeout=Config.SMTP_TIMEOUT_SECONDS)
+        server.connect(mx_record)
+        server.helo("example.com")
+        server.mail("probe@example.com")
+        code, _ = server.rcpt(f"doesnotexist123abc789xyz@{domain}")
+        server.quit()
+        return code == 250
+    except Exception:
+        return False
+
+
 def check_email(email: str) -> tuple[str, str, int, list[str]]:
     """
     Validate an email address through multiple checks:
     - Syntax validation
     - Disposable domain check
     - Role-based prefix check
-    - MX record lookup
-    - SMTP verification
+    - MX record lookup (with caching)
+    - SMTP verification (with concurrency control and retries)
 
     In mock mode, uses deterministic rules without network calls.
     Returns (status, reason, score, risk_factors).
@@ -406,58 +634,62 @@ def check_email(email: str) -> tuple[str, str, int, list[str]]:
         score, factors = calculate_score_and_risks(email, "risky", "role_based")
         return "risky", "role_based", score, factors
 
-    try:
-        records = dns.resolver.resolve(domain, "MX")
-        mx_record = str(records[0].exchange)
-    except Exception:
+    # DNS/MX lookup with caching
+    mx_records = mx_cache.get_mx(domain)
+    if mx_records is None:
+        try:
+            resolver = dns.resolver.Resolver()
+            resolver.lifetime = Config.DNS_TIMEOUT_SECONDS
+            records = resolver.resolve(domain, "MX")
+            mx_records = [str(r.exchange) for r in records]
+            mx_cache.set_mx(domain, mx_records)
+        except dns.resolver.NXDOMAIN:
+            mx_cache.set_negative(domain)
+            return "invalid", "no_mx", 0, ["no_mail_server"]
+        except dns.resolver.NoAnswer:
+            mx_cache.set_negative(domain)
+            return "invalid", "no_mx", 0, ["no_mail_server"]
+        except dns.resolver.Timeout:
+            return "invalid", "no_mx_dns_timeout", 0, ["no_mail_server"]
+        except Exception:
+            return "invalid", "no_mx", 0, ["no_mail_server"]
+
+    # Check if cached negative result
+    if not mx_records:
         return "invalid", "no_mx", 0, ["no_mail_server"]
 
-    # Check if domain accepts all emails (catch-all)
-    try:
-        server = smtplib.SMTP(timeout=10)
-        server.connect(mx_record)
-        server.helo("example.com")
-        server.mail("probe@example.com")
-        code, _ = server.rcpt(f"doesnotexist123@{domain}")
-        server.quit()
-        if code == 250:
-            score, factors = calculate_score_and_risks(email, "risky", "domain_accepts_all")
-            return "risky", "domain_accepts_all", score, factors
-    except Exception:
-        pass
+    mx_record = mx_records[0]
 
-    def smtp_check() -> int | None:
-        try:
-            server = smtplib.SMTP(timeout=10)
-            server.connect(mx_record)
-            server.helo("example.com")
-            server.mail("verifier@example.com")
-            code, _ = server.rcpt(email)
-            server.quit()
-            return code
-        except Exception:
-            return None
+    # SMTP checks with concurrency control
+    # Acquire global semaphore first, then per-domain
+    with smtp_global_semaphore:
+        domain_sem = get_domain_semaphore(domain)
+        with domain_sem:
+            # Check for catch-all domain
+            if _smtp_check_catch_all(mx_record, domain):
+                score, factors = calculate_score_and_risks(email, "risky", "domain_accepts_all")
+                return "risky", "domain_accepts_all", score, factors
 
-    code = smtp_check()
-    # Retry on temporary failures
-    if code in [421, 450, 451, 452, 503]:
-        time.sleep(5)
-        code = smtp_check()
+            # Main SMTP verification with retry logic
+            code, reason = _smtp_check_with_retry(email, mx_record)
 
+    # Process result
     if code == 250:
-        score, factors = calculate_score_and_risks(email, "valid", "smtp_ok")
-        return "valid", "smtp_ok", score, factors
+        score, factors = calculate_score_and_risks(email, "valid", reason)
+        return "valid", reason, score, factors
     elif code is None:
-        score, factors = calculate_score_and_risks(email, "risky", "smtp_timeout")
-        return "risky", "smtp_timeout", score, factors
-    elif code in [421, 450, 451, 452, 503]:
-        reason = f"smtp_soft_fail_{code}"
+        # Timeout or connection failure
         score, factors = calculate_score_and_risks(email, "risky", reason)
         return "risky", reason, score, factors
-    elif code == 550:
-        return "invalid", "smtp_reject", 0, ["mailbox_not_found"]
+    elif code in (421, 450, 451, 452):
+        # Temporary failure persisted after retries
+        score, factors = calculate_score_and_risks(email, "risky", reason)
+        return "risky", reason, score, factors
+    elif code in (550, 551, 552, 553, 554):
+        # Hard reject
+        return "invalid", reason, 0, ["mailbox_not_found"]
     else:
-        reason = f"smtp_{code}"
+        # Other SMTP codes
         score, factors = calculate_score_and_risks(email, "invalid", reason)
         return "invalid", reason, score, factors
 
@@ -512,6 +744,8 @@ def calculate_job_summary(job_data: dict) -> dict:
 
 
 @app.route("/verify", methods=["POST"])
+@require_api_key
+@rate_limit
 def verify() -> tuple[Response, int] | Response:
     """
     Upload a CSV file and start email verification job.
@@ -889,6 +1123,7 @@ def log() -> Response:
 
 
 @app.route("/cancel", methods=["POST"])
+@require_api_key
 def cancel() -> tuple[str, int]:
     """Cancel a running verification job."""
     job_id = request.args.get("job_id")
@@ -1096,6 +1331,7 @@ def get_job_detail(job_id: str) -> tuple[Response, int] | Response:
 
 
 @app.route("/jobs/<job_id>", methods=["DELETE"])
+@require_api_key
 def delete_job_endpoint(job_id: str) -> tuple[Response, int] | tuple[str, int]:
     """Delete a job and all its associated files."""
     # Check if job exists
@@ -1161,6 +1397,7 @@ def clear_memory_for_testing() -> None:
 def serve_index() -> Response:
     """Serve the frontend index.html."""
     import os
+
     frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
     return send_from_directory(frontend_dir, "index.html")
 
@@ -1169,6 +1406,7 @@ def serve_index() -> Response:
 def serve_static(path: str) -> Response:
     """Serve static files from frontend directory."""
     import os
+
     frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
     return send_from_directory(frontend_dir, path)
 

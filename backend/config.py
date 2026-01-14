@@ -69,6 +69,26 @@ class Config:
     JOB_HEARTBEAT_INTERVAL_ROWS: int = int(os.getenv("JOB_HEARTBEAT_INTERVAL_ROWS", "10"))
     JOB_STALL_TIMEOUT_MINUTES: int = int(os.getenv("JOB_STALL_TIMEOUT_MINUTES", "10"))
 
+    # SMTP/DNS timeouts and retry configuration
+    SMTP_TIMEOUT_SECONDS: int = int(os.getenv("SMTP_TIMEOUT_SECONDS", "20"))
+    DNS_TIMEOUT_SECONDS: int = int(os.getenv("DNS_TIMEOUT_SECONDS", "5"))
+    SMTP_RETRIES: int = int(os.getenv("SMTP_RETRIES", "1"))
+    RETRY_BACKOFF_MS: int = int(os.getenv("RETRY_BACKOFF_MS", "900"))
+
+    # SMTP concurrency control
+    SMTP_GLOBAL_WORKERS: int = int(os.getenv("SMTP_GLOBAL_WORKERS", "15"))
+    SMTP_PER_DOMAIN_LIMIT: int = int(os.getenv("SMTP_PER_DOMAIN_LIMIT", "2"))
+
+    # DNS cache TTL
+    DNS_CACHE_TTL_MINUTES: int = int(os.getenv("DNS_CACHE_TTL_MINUTES", "30"))
+
+    # API Security
+    APP_API_KEY: str = os.getenv("APP_API_KEY", "")  # Empty = no auth required (dev mode)
+
+    # Rate Limiting
+    RATE_LIMIT_IP_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_IP_PER_MINUTE", "10"))
+    RATE_LIMIT_KEY_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_KEY_PER_MINUTE", "100"))
+
     # Scoring
     SCORING_VERSION: str = "2.0"
     FREE_EMAIL_PROVIDERS: set[str] = {
@@ -116,6 +136,53 @@ class Config:
             raise ValueError(
                 f"JOB_STALL_TIMEOUT_MINUTES must be between 1 and 60, "
                 f"got {cls.JOB_STALL_TIMEOUT_MINUTES}"
+            )
+
+        # SMTP/DNS validation
+        if cls.SMTP_TIMEOUT_SECONDS < 5 or cls.SMTP_TIMEOUT_SECONDS > 120:
+            raise ValueError(
+                f"SMTP_TIMEOUT_SECONDS must be between 5 and 120, got {cls.SMTP_TIMEOUT_SECONDS}"
+            )
+
+        if cls.DNS_TIMEOUT_SECONDS < 1 or cls.DNS_TIMEOUT_SECONDS > 30:
+            raise ValueError(
+                f"DNS_TIMEOUT_SECONDS must be between 1 and 30, got {cls.DNS_TIMEOUT_SECONDS}"
+            )
+
+        if cls.SMTP_RETRIES < 0 or cls.SMTP_RETRIES > 5:
+            raise ValueError(f"SMTP_RETRIES must be between 0 and 5, got {cls.SMTP_RETRIES}")
+
+        if cls.RETRY_BACKOFF_MS < 100 or cls.RETRY_BACKOFF_MS > 10000:
+            raise ValueError(
+                f"RETRY_BACKOFF_MS must be between 100 and 10000, got {cls.RETRY_BACKOFF_MS}"
+            )
+
+        if cls.SMTP_GLOBAL_WORKERS < 1 or cls.SMTP_GLOBAL_WORKERS > 100:
+            raise ValueError(
+                f"SMTP_GLOBAL_WORKERS must be between 1 and 100, got {cls.SMTP_GLOBAL_WORKERS}"
+            )
+
+        if cls.SMTP_PER_DOMAIN_LIMIT < 1 or cls.SMTP_PER_DOMAIN_LIMIT > 20:
+            raise ValueError(
+                f"SMTP_PER_DOMAIN_LIMIT must be between 1 and 20, got {cls.SMTP_PER_DOMAIN_LIMIT}"
+            )
+
+        if cls.DNS_CACHE_TTL_MINUTES < 1 or cls.DNS_CACHE_TTL_MINUTES > 120:
+            raise ValueError(
+                f"DNS_CACHE_TTL_MINUTES must be between 1 and 120, got {cls.DNS_CACHE_TTL_MINUTES}"
+            )
+
+        # Rate limiting validation
+        if cls.RATE_LIMIT_IP_PER_MINUTE < 1 or cls.RATE_LIMIT_IP_PER_MINUTE > 1000:
+            raise ValueError(
+                f"RATE_LIMIT_IP_PER_MINUTE must be between 1 and 1000, "
+                f"got {cls.RATE_LIMIT_IP_PER_MINUTE}"
+            )
+
+        if cls.RATE_LIMIT_KEY_PER_MINUTE < 1 or cls.RATE_LIMIT_KEY_PER_MINUTE > 10000:
+            raise ValueError(
+                f"RATE_LIMIT_KEY_PER_MINUTE must be between 1 and 10000, "
+                f"got {cls.RATE_LIMIT_KEY_PER_MINUTE}"
             )
 
 

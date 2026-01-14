@@ -1,0 +1,72 @@
+# =============================================================================
+# Docker Build Ignore File
+# =============================================================================
+# Rename this file to .dockerignore to use it.
+# This file lists patterns to exclude from Docker build context.
+
+# Git
+.git
+.gitignore
+.github
+
+# IDE/Editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/venv
+backend/.venv
+venv
+.venv
+*.egg-info
+.eggs
+dist
+build
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.mypy_cache
+.ruff_cache
+
+# Environment files (secrets!)
+.env
+*.env.local
+.env.production
+
+# Data directories (mounted at runtime)
+data/
+backend/storage/uploads/*
+backend/storage/outputs/*
+!backend/storage/.gitkeep
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Development files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# IDE config
+.cursor
+.claude
+
+# Test files
+*.csv
+!Fortune500leads.csv
+
+# Local config
+*.local
