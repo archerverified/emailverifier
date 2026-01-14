@@ -22,6 +22,19 @@ Complete guide for deploying the email verification backend to a production VPS.
 - Domain `validator.2ndimpression.co` pointed to VPS IP `76.13.27.113` (A record, not CNAME)
 - SSH access to VPS
 
+## Important: Gunicorn Workers
+
+> **CRITICAL**: The default configuration uses `GUNICORN_WORKERS=1` (single worker).
+>
+> **Do NOT increase workers** unless you move job state to a shared store (Redis/DB).
+>
+> **Why**: Job progress and cancellation state are stored in per-process memory. Multiple workers cause requests to hit different processes, resulting in:
+> - Progress flipping between "Row 0" and actual progress
+> - Cancel requests not reaching the worker running the job
+> - Inconsistent job state in the UI
+>
+> If you need more concurrency, increase `GUNICORN_THREADS` (default: 8) instead.
+
 ---
 
 # Part A: Run on VPS (Ubuntu bash)

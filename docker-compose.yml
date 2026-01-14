@@ -59,6 +59,11 @@ services:
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Gunicorn (CRITICAL: keep workers=1 for job state consistency)
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-8}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-180}
     volumes:
       # Persist SQLite database and job outputs
       - ./data/storage:/app/storage

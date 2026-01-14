@@ -66,8 +66,10 @@ fi
 echo "   Using template: $ENV_TEMPLATE"
 
 # Create .env from template with API key substitution
+# CRITICAL: Keep GUNICORN_WORKERS=1 (already set in template)
 cat "$ENV_TEMPLATE" | sed "s|CHANGE_ME__GENERATE_WITH_OPENSSL_RAND_HEX_32|$API_KEY|g" > .env
 echo "   Done."
+echo "   NOTE: GUNICORN_WORKERS=1 (required for job state consistency)"
 
 # Build and start services
 echo ""

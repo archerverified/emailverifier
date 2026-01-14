@@ -878,6 +878,11 @@ def verify() -> tuple[Response, int] | Response:
     original_content = content.encode("utf-8")
 
     with data_lock:
+        # #region agent log
+        import os, json
+        with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:881","message":"job created in worker memory","data":{"job_id":job_id,"worker_pid":os.getpid(),"total_rows":total},"timestamp":int(__import__('time').time()*1000)})+'\n')
+        # #endregion
         data[job_id] = {
             "progress": 0,
             "row": 0,
@@ -999,6 +1004,12 @@ def verify() -> tuple[Response, int] | Response:
             with data_lock:
                 data[job_id]["writer"].writerow(row)
                 percent = int((i / total) * 100)
+                # #region agent log
+                if i % 5 == 0:  # Log every 5 rows to avoid spam
+                    import os, json
+                    with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1007","message":"progress updated in worker","data":{"job_id":job_id,"worker_pid":os.getpid(),"row":i,"percent":percent,"total":total},"timestamp":int(__import__('time').time()*1000)})+'\n')
+                # #endregion
                 data[job_id].update(
                     {
                         "progress": percent,
@@ -1074,9 +1085,20 @@ def progress() -> Response:
     """Get current progress of a verification job."""
     job_id = request.args.get("job_id")
 
+    # #region agent log
+    import os, json
+    with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
+        f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1078","message":"progress endpoint called","data":{"job_id":job_id,"worker_pid":os.getpid(),"in_memory_jobs":list(data.keys())},"timestamp":int(__import__('time').time()*1000)})+'\n')
+    # #endregion
+
     # Check in-memory first (for running jobs)
     with data_lock:
         d = data.get(job_id, {})
+        # #region agent log
+        import os, json
+        with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1080","message":"in-memory lookup result","data":{"job_id":job_id,"found_in_memory":bool(d),"row":d.get("row",0) if d else 0,"progress":d.get("progress",0) if d else 0,"worker_pid":os.getpid()},"timestamp":int(__import__('time').time()*1000)})+'\n')
+        # #endregion
         if d:
             response_data = {
                 "percent": d.get("progress", 0),

@@ -28,4 +28,4 @@ EXPOSE 5050
 # Set default to real mode (can override in docker-compose)
 ENV VALIDATOR_MODE=real
 
-CMD ["gunicorn", "-w", "2", "-k", "gthread", "-t", "120", "-b", "0.0.0.0:5050", "app:app"]
+CMD ["sh", "-c", "gunicorn -w ${GUNICORN_WORKERS:-1} --threads ${GUNICORN_THREADS:-8} -k gthread -t ${GUNICORN_TIMEOUT:-180} -b 0.0.0.0:5050 app:app"]
