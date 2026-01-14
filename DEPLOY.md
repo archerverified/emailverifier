@@ -2,6 +2,16 @@
 
 Complete guide for deploying the email verification backend to a production VPS.
 
+> **WARNING: Do not run PowerShell commands on the VPS. Do not run bash heredocs in PowerShell.**
+>
+> This guide has two sections:
+> - **Part A**: Run on VPS (Ubuntu bash)
+> - **Part B**: Run on Windows PowerShell
+>
+> Copy commands from the correct section only!
+
+---
+
 ## Prerequisites
 
 - Ubuntu 22.04+ VPS with:
@@ -9,14 +19,37 @@ Complete guide for deploying the email verification backend to a production VPS.
   - 20GB+ storage
   - Public IPv4 address
   - Port 25 outbound (for SMTP verification)
-- Domain name pointed to VPS IP (for HTTPS)
+- Domain `validator.2ndimpression.co` pointed to VPS IP `76.13.27.113` (A record, not CNAME)
 - SSH access to VPS
 
-## Quick Start
+---
 
-### 1. Server Setup
+# Part A: Run on VPS (Ubuntu bash)
 
-SSH into your VPS and run:
+All commands in this section are for **bash on the VPS**. Prompt shown as `root@vps:~#` or `user@vps:~$`.
+
+## Quick Deploy (Recommended)
+
+Use the automated runbook script for fastest deployment:
+
+```bash
+# SSH into VPS first, then run:
+cd /opt/emailverifier
+bash scripts/runbook_vps.sh
+```
+
+The script will:
+1. Pull latest code
+2. Generate a new API key
+3. Write `.env`
+4. Build and start Docker containers
+5. Print your API key at the end
+
+---
+
+## Manual Setup (Step-by-Step)
+
+### 1. Initial Server Setup
 
 ```bash
 # Update system
@@ -26,8 +59,8 @@ sudo apt update && sudo apt upgrade -y
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER
 
-# Install Docker Compose plugin
-sudo apt install -y docker-compose-plugin
+# Install Docker Compose plugin and utilities
+sudo apt install -y docker-compose-plugin git curl openssl jq
 
 # Verify installation
 docker --version
@@ -41,51 +74,38 @@ SSH back in and continue:
 
 ```bash
 # Create app directory
-sudo mkdir -p /opt/lead-validator
-sudo chown $USER:$USER /opt/lead-validator
-cd /opt/lead-validator
+sudo mkdir -p /opt/emailverifier
+sudo chown $USER:$USER /opt/emailverifier
+cd /opt/emailverifier
 
 # Clone repository
 git clone https://github.com/archerverified/emailverifier.git .
 
 # Create data directories
 mkdir -p data/storage data/caddy/data data/caddy/config
-
-# Rename dockerignore
-mv dockerignore.txt .dockerignore
 ```
 
 ### 2. Configuration
 
 ```bash
-# Copy environment template
-cp env.example .env
+cd /opt/emailverifier
 
-# Edit configuration
-nano .env
-```
+# Generate API key
+API_KEY=$(openssl rand -hex 32)
+echo "Your API key: $API_KEY"
 
-**Critical settings to change:**
+# Copy environment template (handles both naming conventions)
+if [ -f .env.example ]; then
+  cp .env.example .env
+elif [ -f env.example ]; then
+  cp env.example .env
+fi
 
-```env
-# Your domain (required for HTTPS)
-DOMAIN=validator.2ndimpression.co
+# Replace placeholder with generated key
+sed -i "s|CHANGE_ME__GENERATE_WITH_OPENSSL_RAND_HEX_32|$API_KEY|g" .env
 
-# Generate a secure API key
-APP_API_KEY=$(openssl rand -hex 32)
-
-# Set production mode
-FLASK_ENV=production
-VALIDATOR_MODE=real
-```
-
-Generate API key:
-
-```bash
-# Generate and display a secure key
-openssl rand -hex 32
-
-# Then add it to .env
+# Verify .env looks correct
+cat .env | grep APP_API_KEY
 ```
 
 ### 3. Firewall Setup
@@ -108,7 +128,7 @@ sudo ufw status
 ### 4. Deploy
 
 ```bash
-cd /opt/lead-validator
+cd /opt/emailverifier
 
 # Build and start containers
 docker compose up -d --build
@@ -116,84 +136,29 @@ docker compose up -d --build
 # Check status
 docker compose ps
 
-# View logs
+# View logs (Ctrl+C to exit)
 docker compose logs -f backend
-
-# Test health endpoint
-curl http://localhost:5050/health
 ```
 
-### 5. Verify HTTPS
-
-Once Caddy provisions the certificate (may take 1-2 minutes):
+### 5. Verify Deployment
 
 ```bash
-# Test HTTPS endpoint
-curl https://validator.2ndimpression.co/health
+# Internal health check (via container)
+docker compose exec backend curl -fsS http://localhost:5050/health
 
-# Test with API key
-curl -H "X-API-Key: YOUR_API_KEY" https://validator.2ndimpression.co/schema
+# External HTTPS check (once Caddy provisions certificate, ~1-2 min)
+curl -fsS https://validator.2ndimpression.co/health
+
+# Test auth (should return 401)
+curl -sS -X POST https://validator.2ndimpression.co/verify | head -c 200
+
+# Test with API key (replace YOUR_API_KEY with actual key)
+curl -sS -H "X-API-Key: YOUR_API_KEY" https://validator.2ndimpression.co/schema
 ```
 
-## Testing
+---
 
-### Health Check
-
-```bash
-curl https://validator.2ndimpression.co/health
-# Expected: {"status":"ok"}
-```
-
-### API Key Authentication
-
-```bash
-# Without key (should fail with 401)
-curl -X POST https://validator.2ndimpression.co/verify
-# Expected: {"error":{"code":"UNAUTHORIZED",...}}
-
-# With key
-curl -H "X-API-Key: YOUR_KEY" https://validator.2ndimpression.co/schema
-# Expected: {"endpoints":[...]}
-```
-
-### Rate Limiting
-
-```bash
-# Test rate limit (run 15 times quickly)
-for i in {1..15}; do
-  curl -s -o /dev/null -w "%{http_code}\n" \
-    -H "X-API-Key: YOUR_KEY" \
-    -X POST https://validator.2ndimpression.co/verify
-done
-# Should see 429 after 10 requests
-```
-
-### Email Verification
-
-```bash
-# Upload a test CSV
-echo -e "email\ntest@example.com" > /tmp/test.csv
-
-curl -X POST \
-  -H "X-API-Key: YOUR_KEY" \
-  -F "file=@/tmp/test.csv" \
-  https://validator.2ndimpression.co/verify
-```
-
-### SMTP Connectivity (Port 25)
-
-```bash
-# Test outbound SMTP
-nc -zv gmail-smtp-in.l.google.com 25
-
-# Or with telnet
-telnet gmail-smtp-in.l.google.com 25
-# Type: QUIT to exit
-
-# If blocked, contact your VPS provider
-```
-
-## Operations
+## Operations (VPS)
 
 ### View Logs
 
@@ -221,16 +186,17 @@ docker compose restart backend
 ### Update Application
 
 ```bash
-cd /opt/lead-validator
+cd /opt/emailverifier
 
 # Pull latest code
-git pull origin main
+git fetch --all
+git reset --hard origin/main
 
 # Rebuild and restart
 docker compose up -d --build
 
 # Verify health
-curl https://validator.2ndimpression.co/health
+curl -fsS https://validator.2ndimpression.co/health
 ```
 
 ### Backup
@@ -241,7 +207,7 @@ mkdir -p /opt/backups
 
 # Backup data (SQLite + outputs)
 tar -czf /opt/backups/lead-validator-$(date +%Y%m%d).tar.gz \
-  -C /opt/lead-validator data/storage
+  -C /opt/emailverifier data/storage
 
 # List backups
 ls -la /opt/backups/
@@ -251,79 +217,20 @@ ls -la /opt/backups/
 
 ```bash
 # Stop services
+cd /opt/emailverifier
 docker compose down
 
 # Restore from backup
 tar -xzf /opt/backups/lead-validator-YYYYMMDD.tar.gz \
-  -C /opt/lead-validator
+  -C /opt/emailverifier
 
 # Restart services
 docker compose up -d
 ```
 
-### Log Rotation
+---
 
-Docker handles log rotation automatically. To configure:
-
-```bash
-# Edit /etc/docker/daemon.json
-sudo nano /etc/docker/daemon.json
-```
-
-Add:
-
-```json
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  }
-}
-```
-
-```bash
-# Restart Docker
-sudo systemctl restart docker
-```
-
-### Caddy Access Logs
-
-```bash
-# View Caddy access logs
-docker compose exec caddy cat /data/access.log | tail -20
-
-# Or from host
-cat data/caddy/data/access.log | tail -20
-```
-
-## DNS & rDNS Setup
-
-### Forward DNS (A Record)
-
-In your domain registrar/DNS provider:
-
-```
-Type: A
-Name: api (or @ for root)
-Value: YOUR_VPS_IP
-TTL: 300
-```
-
-### Reverse DNS (PTR Record)
-
-For better email deliverability, set rDNS on your VPS:
-
-1. Log into your VPS provider panel (e.g., Vultr, DigitalOcean)
-2. Find "Reverse DNS" or "PTR Record" settings
-3. Set PTR to: `validator.2ndimpression.co`
-4. Verify:
-   ```bash
-   dig -x YOUR_VPS_IP +short
-   # Should return: validator.2ndimpression.co.
-   ```
-
-## Troubleshooting
+## Troubleshooting (VPS)
 
 ### Container Won't Start
 
@@ -331,11 +238,10 @@ For better email deliverability, set rDNS on your VPS:
 # Check logs
 docker compose logs backend
 
-# Common issues:
-# - Port already in use: Check for existing processes
+# Check if port in use
 sudo lsof -i :5050
 
-# - Permission denied on storage
+# Fix storage permissions
 sudo chown -R 1000:1000 data/storage
 ```
 
@@ -344,61 +250,66 @@ sudo chown -R 1000:1000 data/storage
 ```bash
 # Check Caddy logs
 docker compose logs caddy
+```
 
-# Common issues:
-# - DNS not propagated: wait 5-10 minutes
-# - Port 80/443 blocked: check firewall
-# - Rate limited: wait 1 hour (Let's Encrypt limit)
+**Top 3 causes:**
+1. **DNS not pointing to VPS**: `validator.2ndimpression.co` must resolve to `76.13.27.113` (A record, not CNAME)
+2. **Ports blocked**: Firewall not allowing 80/443
+3. **Let's Encrypt rate limit**: Wait 1 hour if too many recent attempts
 
-# Force certificate renewal
+```bash
+# Force certificate reload
 docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
 ### Port 25 Blocked
 
-Many VPS providers block outbound port 25 by default. Solutions:
-
-1. **Request unblock**: Contact VPS support
-2. **Use relay**: Configure an SMTP relay service
-3. **Different provider**: Some providers (Vultr, OVH) allow port 25
-
-Test:
-
 ```bash
+# Test outbound SMTP
 nc -zv gmail-smtp-in.l.google.com 25
-# If timeout, port is blocked
-```
 
-### Rate Limited
-
-```bash
-# Check current limits
-curl -s https://validator.2ndimpression.co/metrics | jq .
-
-# Clear rate limiter (restart backend)
-docker compose restart backend
+# If timeout, port is blocked - contact VPS provider
 ```
 
 ### Database Locked
 
 ```bash
-# Check for processes using DB
-docker compose exec backend fuser data/storage/lead_validator.db
-
 # Restart to clear locks
 docker compose restart backend
 ```
 
-## Rollback
+---
 
-If something goes wrong:
+## DNS & rDNS Setup
+
+### Forward DNS (A Record)
+
+In your domain registrar/DNS provider, set:
+
+```
+Type: A
+Name: validator
+Value: 76.13.27.113
+TTL: 300
+```
+
+### Reverse DNS (PTR Record)
+
+1. Log into your VPS provider panel
+2. Find "Reverse DNS" or "PTR Record" settings
+3. Set PTR to: `validator.2ndimpression.co`
+4. Verify:
+   ```bash
+   dig -x 76.13.27.113 +short
+   # Should return: validator.2ndimpression.co.
+   ```
+
+---
+
+## Rollback (VPS)
 
 ```bash
-# Rollback to previous version
-cd /opt/lead-validator
-
-# Tag current as broken (optional)
-docker tag lead-validator-backend:latest lead-validator-backend:broken
+cd /opt/emailverifier
 
 # Checkout previous commit
 git log --oneline -5  # Find good commit
@@ -408,44 +319,103 @@ git checkout COMMIT_HASH
 docker compose up -d --build
 
 # If needed, restore data
-tar -xzf /opt/backups/lead-validator-YYYYMMDD.tar.gz -C /opt/lead-validator
+tar -xzf /opt/backups/lead-validator-YYYYMMDD.tar.gz -C /opt/emailverifier
 ```
+
+---
+
+# Part B: Run on Windows PowerShell
+
+All commands in this section are for **PowerShell on Windows**. Prompt shown as `PS C:\>`.
+
+## Quick Test (Recommended)
+
+Use the automated test script:
+
+```powershell
+# In PowerShell, from repo root:
+.\scripts\runbook_windows.ps1
+```
+
+---
+
+## Manual Testing
+
+### 1. DNS Check
+
+```powershell
+nslookup validator.2ndimpression.co
+```
+
+Expected: Should resolve to `76.13.27.113`
+
+### 2. HTTPS Health Check
+
+```powershell
+curl.exe -s "https://validator.2ndimpression.co/health"
+```
+
+Expected output:
+```json
+{"status":"ok"}
+```
+
+### 3. Auth Check (expect 401)
+
+```powershell
+curl.exe -i -X POST "https://validator.2ndimpression.co/verify"
+```
+
+Expected: HTTP 401 with JSON error body containing `"code":"UNAUTHORIZED"`
+
+### 4. Verify with API Key
+
+```powershell
+# Set your API key (from VPS deployment)
+$ApiKey = "YOUR_API_KEY_HERE"
+
+# Create temp CSV
+"email`ntest@example.com" | Out-File -Encoding ascii "$env:TEMP\test.csv"
+
+# Upload and verify
+curl.exe -s -H "X-API-Key: $ApiKey" -F "file=@$env:TEMP\test.csv" "https://validator.2ndimpression.co/verify"
+```
+
+Expected: JSON response with `job_id`
+
+### 5. Check Job Status
+
+```powershell
+$JobId = "JOB_ID_FROM_PREVIOUS_STEP"
+curl.exe -s "https://validator.2ndimpression.co/progress?job_id=$JobId"
+```
+
+---
+
+## Verify Checklist
+
+| URL | Expected |
+|-----|----------|
+| `https://validator.2ndimpression.co/` | HTML UI loads |
+| `https://validator.2ndimpression.co/ui.css` | CSS file (200) |
+| `https://validator.2ndimpression.co/health` | `{"status":"ok"}` |
+| `https://validator.2ndimpression.co/schema` | JSON schema |
+| `POST /verify` without key | 401 Unauthorized |
+| `POST /verify` with key + CSV | 200 with job_id |
+
+---
 
 ## Security Checklist
 
 - [ ] Changed default API key in `.env`
-- [ ] Firewall enabled (UFW)
+- [ ] Firewall enabled (UFW) on VPS
 - [ ] Only ports 22, 80, 443 open
-- [ ] SSH key authentication (disable password)
+- [ ] SSH key authentication (disable password auth)
 - [ ] Regular backups scheduled
-- [ ] Log monitoring enabled
 - [ ] HTTPS working
 - [ ] rDNS configured
 
-## Monitoring (Optional)
-
-### Basic Health Monitoring
-
-Add to crontab for alerts:
-
-```bash
-crontab -e
-```
-
-```
-*/5 * * * * curl -sf https://validator.2ndimpression.co/health || echo "Lead Validator DOWN" | mail -s "Alert" admin@yourdomain.com
-```
-
-### Resource Monitoring
-
-```bash
-# View resource usage
-docker stats
-
-# Check disk usage
-df -h
-du -sh data/storage/*
-```
+---
 
 ## Support
 
