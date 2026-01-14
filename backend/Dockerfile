@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy backend requirements and install
@@ -25,4 +28,4 @@ EXPOSE 5050
 # Set default to real mode (can override in docker-compose)
 ENV VALIDATOR_MODE=real
 
-CMD ["python", "app.py"]
+CMD ["gunicorn", "-w", "2", "-k", "gthread", "-t", "120", "-b", "0.0.0.0:5050", "app:app"]
