@@ -23,6 +23,7 @@ import dns.resolver
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
+import catch_all_cache
 import csv_utils
 import db
 import dns_cache
@@ -105,6 +106,9 @@ if cleanup_count > 0:
 # Initialize DNS cache (process-lifetime with TTL)
 mx_cache = dns_cache.DNSCache(Config.DNS_CACHE_TTL_MINUTES)
 
+# Initialize catch-all cache (avoid redundant catch-all checks per domain)
+catchall_cache = catch_all_cache.CatchAllCache(Config.CATCH_ALL_CACHE_TTL_MINUTES)
+
 # SMTP concurrency control (semaphores)
 smtp_global_semaphore = threading.Semaphore(Config.SMTP_GLOBAL_WORKERS)
 domain_semaphores: dict[str, threading.Semaphore] = {}
@@ -157,7 +161,7 @@ def get_running_jobs_count() -> int:
     Get count of currently running jobs.
     Combines in-memory active jobs with database running jobs.
     """
-    with data_lock:
+    with JOB_STATE_LOCK:
         # Count in-memory jobs that are still processing
         memory_count = sum(
             1 for job in data.values() if job.get("progress", 0) < 100 and not job.get("cancel")
@@ -179,9 +183,12 @@ ROLE_BASED_PREFIXES = {"info", "support", "admin", "sales", "contact"}
 EMAIL_COLUMN_EXACT = {"email", "e-mail", "e_mail", "emailaddress", "email_address"}
 EMAIL_COLUMN_CONTAINS = {"email", "e-mail", "mail"}
 
-# Thread-safe job data storage
+# Thread-safe job data storage with global RLock
 data: dict = {}
-data_lock = threading.Lock()
+JOB_STATE_LOCK = threading.RLock()  # Single global lock for all job state operations
+
+# Backward compatibility alias (deprecated, use JOB_STATE_LOCK)
+data_lock = JOB_STATE_LOCK
 
 
 # Request ID middleware
@@ -665,8 +672,16 @@ def check_email(email: str) -> tuple[str, str, int, list[str]]:
     with smtp_global_semaphore:
         domain_sem = get_domain_semaphore(domain)
         with domain_sem:
-            # Check for catch-all domain
-            if _smtp_check_catch_all(mx_record, domain):
+            # Check for catch-all domain (with caching to avoid redundant checks)
+            cached_catch_all = catchall_cache.get(domain)
+            if cached_catch_all is None:
+                # Not cached - perform the check
+                is_catch_all = _smtp_check_catch_all(mx_record, domain)
+                catchall_cache.set(domain, is_catch_all)
+            else:
+                is_catch_all = cached_catch_all
+
+            if is_catch_all:
                 score, factors = calculate_score_and_risks(email, "risky", "domain_accepts_all")
                 return "risky", "domain_accepts_all", score, factors
 
@@ -692,6 +707,62 @@ def check_email(email: str) -> tuple[str, str, int, list[str]]:
         # Other SMTP codes
         score, factors = calculate_score_and_risks(email, "invalid", reason)
         return "invalid", reason, score, factors
+
+
+def _maybe_update_heartbeat(job_id: str, processing_row: int | None = None) -> None:
+    """
+    Update job heartbeat if enough time has elapsed since last update.
+    Uses time.monotonic() for gating to avoid clock skew issues.
+
+    Args:
+        job_id: The job ID to update
+        processing_row: Optional row number currently being processed
+    """
+    with JOB_STATE_LOCK:
+        job = data.get(job_id)
+        if not job:
+            return
+
+        now_mono = time.monotonic()
+        last_mono = job.get("last_heartbeat_mono", 0)
+
+        if now_mono - last_mono >= Config.JOB_HEARTBEAT_INTERVAL_SECONDS:
+            job["last_heartbeat_mono"] = now_mono
+            utc_now = Config.now_utc().isoformat()
+            job["last_heartbeat_utc"] = utc_now
+
+            if processing_row is not None:
+                job["processing_row"] = processing_row
+
+            # Persist to DB (lightweight update)
+            db.update_job_heartbeat(job_id, utc_now)
+
+
+def _force_update_heartbeat(job_id: str, processing_row: int | None = None) -> None:
+    """
+    Force update job heartbeat regardless of elapsed time.
+    Called after each row completes to keep UI snappy.
+
+    Args:
+        job_id: The job ID to update
+        processing_row: Optional row number currently being processed
+    """
+    with JOB_STATE_LOCK:
+        job = data.get(job_id)
+        if not job:
+            return
+
+        now_mono = time.monotonic()
+        utc_now = Config.now_utc().isoformat()
+
+        job["last_heartbeat_mono"] = now_mono
+        job["last_heartbeat_utc"] = utc_now
+
+        if processing_row is not None:
+            job["processing_row"] = processing_row
+
+        # Persist to DB (lightweight update)
+        db.update_job_heartbeat(job_id, utc_now)
 
 
 def calculate_job_summary(job_data: dict) -> dict:
@@ -877,10 +948,11 @@ def verify() -> tuple[Response, int] | Response:
     # Store original content bytes for persistence
     original_content = content.encode("utf-8")
 
-    with data_lock:
+    with JOB_STATE_LOCK:
         data[job_id] = {
             "progress": 0,
-            "row": 0,
+            "row": 0,  # Completed rows (backward compat)
+            "processing_row": 0,  # Row currently being processed
             "total": total,
             "log": "",
             "cancel": False,
@@ -894,6 +966,9 @@ def verify() -> tuple[Response, int] | Response:
             "start_time": time.time(),
             "summary": None,
             "original_content": original_content,
+            # Time-based heartbeat tracking
+            "last_heartbeat_mono": time.monotonic(),
+            "last_heartbeat_utc": Config.now_utc().isoformat(),
         }
 
     # Log job creation
@@ -928,7 +1003,8 @@ def verify() -> tuple[Response, int] | Response:
         results_for_db: list[dict] = []
 
         for i, row in enumerate(reader, start=1):
-            with data_lock:
+            # Set processing_row BEFORE starting work on this row
+            with JOB_STATE_LOCK:
                 if job_id not in data:
                     # Job was cleared (e.g., by test fixture)
                     break
@@ -947,6 +1023,11 @@ def verify() -> tuple[Response, int] | Response:
                         }
                     )
                     break
+                # Mark which row we're about to process
+                data[job_id]["processing_row"] = i
+
+            # Time-based heartbeat check BEFORE potentially slow DNS/SMTP operations
+            _maybe_update_heartbeat(job_id, processing_row=i)
 
             # Extract and normalize email
             email_raw = (row.get(email_field) or "").strip()
@@ -967,11 +1048,13 @@ def verify() -> tuple[Response, int] | Response:
                         ["empty_email"],
                     )
                 else:
+                    # This call may take a long time (DNS + SMTP)
+                    # Heartbeat is updated inside check_email via _maybe_update_heartbeat
                     status, reason, score, risk_factors = check_email(email)
 
-            # Update heartbeat every N rows
+            # Row-based heartbeat (backward compat) + always update after row completes
             if i % Config.JOB_HEARTBEAT_INTERVAL_ROWS == 0:
-                db.update_job_heartbeat(job_id)
+                _force_update_heartbeat(job_id, processing_row=i)
 
             row["status"] = status
             row["reason"] = reason
@@ -996,19 +1079,21 @@ def verify() -> tuple[Response, int] | Response:
                 }
             )
 
-            with data_lock:
+            with JOB_STATE_LOCK:
+                if job_id not in data:
+                    break  # Job cleared
                 data[job_id]["writer"].writerow(row)
                 percent = int((i / total) * 100)
                 data[job_id].update(
                     {
                         "progress": percent,
-                        "row": i,
+                        "row": i,  # Completed rows
                         "log": f"\u2705 {email} \u2192 {status} (score:{score})",
                     }
                 )
 
         # Save to temp file for downloads and calculate summary
-        with data_lock:
+        with JOB_STATE_LOCK:
             output = data[job_id]["output"]
             output.seek(0)
             temp = NamedTemporaryFile(delete=False, suffix=".csv", mode="w+", encoding="utf-8")
@@ -1043,7 +1128,7 @@ def verify() -> tuple[Response, int] | Response:
             db.save_job_results(job_id, results_for_db)
 
             # Get summary for DB update (may be cleared by test fixture)
-            with data_lock:
+            with JOB_STATE_LOCK:
                 job_data = data.get(job_id, {})
                 summary = job_data.get("summary", {}) if job_data else {}
 
@@ -1075,28 +1160,33 @@ def progress() -> Response:
     job_id = request.args.get("job_id")
 
     # Check in-memory first (for running jobs)
-    with data_lock:
+    with JOB_STATE_LOCK:
         d = data.get(job_id, {})
         if d:
             response_data = {
                 "percent": d.get("progress", 0),
-                "row": d.get("row", 0),
+                "row": d.get("row", 0),  # Completed rows (backward compat)
+                "processing_row": d.get("processing_row", 0),  # Row currently being processed
                 "total": d.get("total", 0),
+                "status": "running",
             }
             # Include summary when job is complete
             if d.get("progress", 0) >= 100 and d.get("summary"):
                 response_data["summary"] = d["summary"]
+                response_data["status"] = "completed"
             return jsonify(response_data)
 
     # Not in memory - check database for historical job
     job = db.get_job(job_id)
     if not job:
-        return jsonify({"percent": 0, "row": 0, "total": 0, "error": "Job not found"})
+        return jsonify({"percent": 0, "row": 0, "processing_row": 0, "total": 0, "error": "Job not found"})
 
     # Build response from DB job
+    completed_rows = job.get("total_rows", 0) if job["status"] == "completed" else 0
     response_data = {
         "percent": 100 if job["status"] == "completed" else 0,
-        "row": job.get("total_rows", 0) if job["status"] == "completed" else 0,
+        "row": completed_rows,  # Completed rows (backward compat)
+        "processing_row": completed_rows,  # For completed/failed jobs, same as row
         "total": job.get("total_rows", 0),
         "status": job["status"],
     }
@@ -1118,7 +1208,7 @@ def progress() -> Response:
 def log() -> Response:
     """Get the latest log message for a job."""
     job_id = request.args.get("job_id")
-    with data_lock:
+    with JOB_STATE_LOCK:
         return Response(data.get(job_id, {}).get("log", ""), mimetype="text/plain")
 
 
@@ -1127,7 +1217,7 @@ def log() -> Response:
 def cancel() -> tuple[str, int]:
     """Cancel a running verification job."""
     job_id = request.args.get("job_id")
-    with data_lock:
+    with JOB_STATE_LOCK:
         if job_id in data:
             data[job_id]["cancel"] = True
             # DB update happens in the run() thread when it detects cancel
@@ -1144,7 +1234,7 @@ def download() -> tuple[Response, int] | Response:
     filter_type = request.args.get("type", "all")
 
     # Try in-memory first (for running/recently completed jobs)
-    with data_lock:
+    with JOB_STATE_LOCK:
         job = data.get(job_id)
         if job:
             job["output"].seek(0)
@@ -1340,7 +1430,7 @@ def delete_job_endpoint(job_id: str) -> tuple[Response, int] | tuple[str, int]:
         return jsonify({"error": "Job not found"}), 404
 
     # Remove from in-memory if present
-    with data_lock:
+    with JOB_STATE_LOCK:
         if job_id in data:
             del data[job_id]
 
@@ -1388,7 +1478,7 @@ def download_bundle(job_id: str) -> tuple[Response, int] | Response:
 def clear_memory_for_testing() -> None:
     """Clear in-memory job data. Only for testing purposes."""
     global data
-    with data_lock:
+    with JOB_STATE_LOCK:
         data.clear()
 
 

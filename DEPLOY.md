@@ -35,6 +35,29 @@ Complete guide for deploying the email verification backend to a production VPS.
 >
 > If you need more concurrency, increase `GUNICORN_THREADS` (default: 8) instead.
 
+## Recommended Production Settings
+
+The following settings are optimized for production use:
+
+```bash
+# Job health monitoring (prevents false "stalled" detection during slow SMTP)
+JOB_HEARTBEAT_INTERVAL_SECONDS=15   # Time-based heartbeat (default)
+JOB_HEARTBEAT_INTERVAL_ROWS=10      # Row-based heartbeat (backward compat)
+JOB_STALL_TIMEOUT_MINUTES=60        # Mark job as stalled after 60 min inactivity
+
+# Catch-all cache (big performance win - avoids redundant SMTP checks)
+CATCH_ALL_CACHE_TTL_MINUTES=1440    # Cache catch-all results for 24 hours
+
+# Gunicorn (CRITICAL: keep workers=1)
+GUNICORN_WORKERS=1
+GUNICORN_THREADS=8
+GUNICORN_TIMEOUT=180
+```
+
+## Note: Domain Ownership
+
+The domain `validator.2ndimpression.co` is served entirely from this VPS. Any previous Vercel configuration can be ignored/removed.
+
 ---
 
 # Part A: Run on VPS (Ubuntu bash)

@@ -67,7 +67,8 @@ class Config:
 
     # Job health monitoring (heartbeat / stall detection)
     JOB_HEARTBEAT_INTERVAL_ROWS: int = int(os.getenv("JOB_HEARTBEAT_INTERVAL_ROWS", "10"))
-    JOB_STALL_TIMEOUT_MINUTES: int = int(os.getenv("JOB_STALL_TIMEOUT_MINUTES", "10"))
+    JOB_HEARTBEAT_INTERVAL_SECONDS: int = int(os.getenv("JOB_HEARTBEAT_INTERVAL_SECONDS", "15"))
+    JOB_STALL_TIMEOUT_MINUTES: int = int(os.getenv("JOB_STALL_TIMEOUT_MINUTES", "60"))
 
     # SMTP/DNS timeouts and retry configuration
     SMTP_TIMEOUT_SECONDS: int = int(os.getenv("SMTP_TIMEOUT_SECONDS", "20"))
@@ -81,6 +82,9 @@ class Config:
 
     # DNS cache TTL
     DNS_CACHE_TTL_MINUTES: int = int(os.getenv("DNS_CACHE_TTL_MINUTES", "30"))
+
+    # Catch-all cache TTL (avoid redundant catch-all checks per domain)
+    CATCH_ALL_CACHE_TTL_MINUTES: int = int(os.getenv("CATCH_ALL_CACHE_TTL_MINUTES", "1440"))
 
     # API Security
     APP_API_KEY: str = os.getenv("APP_API_KEY", "")  # Empty = no auth required (dev mode)
@@ -132,10 +136,22 @@ class Config:
                 f"MAX_CONCURRENT_JOBS must be between 1 and 20, got {cls.MAX_CONCURRENT_JOBS}"
             )
 
-        if cls.JOB_STALL_TIMEOUT_MINUTES < 1 or cls.JOB_STALL_TIMEOUT_MINUTES > 60:
+        if cls.JOB_STALL_TIMEOUT_MINUTES < 1 or cls.JOB_STALL_TIMEOUT_MINUTES > 180:
             raise ValueError(
-                f"JOB_STALL_TIMEOUT_MINUTES must be between 1 and 60, "
+                f"JOB_STALL_TIMEOUT_MINUTES must be between 1 and 180, "
                 f"got {cls.JOB_STALL_TIMEOUT_MINUTES}"
+            )
+
+        if cls.JOB_HEARTBEAT_INTERVAL_SECONDS < 5 or cls.JOB_HEARTBEAT_INTERVAL_SECONDS > 60:
+            raise ValueError(
+                f"JOB_HEARTBEAT_INTERVAL_SECONDS must be between 5 and 60, "
+                f"got {cls.JOB_HEARTBEAT_INTERVAL_SECONDS}"
+            )
+
+        if cls.CATCH_ALL_CACHE_TTL_MINUTES < 1 or cls.CATCH_ALL_CACHE_TTL_MINUTES > 10080:
+            raise ValueError(
+                f"CATCH_ALL_CACHE_TTL_MINUTES must be between 1 and 10080, "
+                f"got {cls.CATCH_ALL_CACHE_TTL_MINUTES}"
             )
 
         # SMTP/DNS validation

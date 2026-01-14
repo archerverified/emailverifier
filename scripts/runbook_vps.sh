@@ -69,7 +69,12 @@ echo "   Using template: $ENV_TEMPLATE"
 # CRITICAL: Keep GUNICORN_WORKERS=1 (already set in template)
 cat "$ENV_TEMPLATE" | sed "s|CHANGE_ME__GENERATE_WITH_OPENSSL_RAND_HEX_32|$API_KEY|g" > .env
 echo "   Done."
-echo "   NOTE: GUNICORN_WORKERS=1 (required for job state consistency)"
+echo ""
+echo "   IMPORTANT SETTINGS (already configured in template):"
+echo "   - GUNICORN_WORKERS=1 (required for job state consistency)"
+echo "   - JOB_HEARTBEAT_INTERVAL_SECONDS=15 (prevents false stall detection)"
+echo "   - JOB_STALL_TIMEOUT_MINUTES=60 (allows slow SMTP operations)"
+echo "   - CATCH_ALL_CACHE_TTL_MINUTES=1440 (caches catch-all checks for 24h)"
 
 # Build and start services
 echo ""
@@ -118,4 +123,7 @@ echo "  curl -H \"X-API-Key: $API_KEY\" https://$DOMAIN/schema"
 echo ""
 echo "View logs:"
 echo "  docker compose logs -f backend"
+echo ""
+echo "NOTE: validator.2ndimpression.co is served entirely from this VPS."
+echo "      Any Vercel configuration can be ignored/removed."
 echo ""

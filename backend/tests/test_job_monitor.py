@@ -2,7 +2,18 @@
 Tests for job monitoring and stall detection.
 """
 
+import io
+import os
+import sys
+import time
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, ".")
+os.environ["TESTING"] = "1"
+os.environ["VALIDATOR_MODE"] = "mock"
 
 import db
 from config import Config
@@ -204,3 +215,126 @@ class TestStallDetection:
         assert job is not None
         # Job should still be running since rate limit prevented update
         assert job["status"] == "running"
+
+
+class TestTimeBasedHeartbeat:
+    """Tests for time-based heartbeat updates."""
+
+    def test_heartbeat_updates_during_job_processing(self, client: pytest.fixture) -> None:
+        """
+        Test that heartbeat is updated during job processing.
+        This prevents false stall detection during slow SMTP operations.
+        """
+        # Create a CSV with a few emails
+        csv_content = "email\n" + "\n".join([f"test{i}@example.com" for i in range(5)]) + "\n"
+        data = {"file": (io.BytesIO(csv_content.encode()), "test.csv")}
+
+        # Start job
+        response = client.post("/verify", data=data, content_type="multipart/form-data")
+        assert response.status_code == 200
+        job_id = response.json["job_id"]
+
+        # Wait for job to complete - check both progress AND DB status
+        job_completed = False
+        for _ in range(100):
+            response = client.get(f"/progress?job_id={job_id}")
+            progress_data = response.json
+            # Also check DB status since thread may update DB after progress shows 100%
+            job = db.get_job(job_id)
+            if progress_data.get("percent", 0) >= 100 and job and job["status"] == "completed":
+                job_completed = True
+                break
+            time.sleep(0.05)
+
+        # Check that job completed (not stalled)
+        assert job_completed, f"Job did not complete. Status: {job['status'] if job else 'not found'}"
+        assert job is not None
+        # Heartbeat should have been updated
+        assert job["last_heartbeat"] is not None
+
+    def test_heartbeat_prevents_false_stall_detection(self) -> None:
+        """
+        Test that time-based heartbeat updates prevent false stall detection.
+        Uses time provider injection to simulate passage of time.
+        """
+        # Create a job that's been "running" for a while but has recent heartbeat
+        start_time = datetime.now(UTC)
+        recent_heartbeat = start_time.isoformat()
+
+        db.save_job(
+            {
+                "id": "test-heartbeat-job",
+                "filename": "test.csv",
+                "created_at": (start_time - timedelta(minutes=30)).isoformat(),
+                "status": "running",
+                "email_column": "email",
+                "mode": "mock",
+                "total_rows": 1000,
+                "last_heartbeat": recent_heartbeat,  # Recent heartbeat
+            }
+        )
+
+        # Run stall detection
+        monitor = JobMonitor()
+        marked_count = monitor.check_stalled_jobs_once()
+
+        # Job should NOT be marked as stalled because heartbeat is recent
+        assert marked_count == 0
+
+        job = db.get_job("test-heartbeat-job")
+        assert job is not None
+        assert job["status"] == "running"
+
+    def test_job_with_updated_heartbeat_not_stalled(self) -> None:
+        """
+        Test that a job with a recently updated heartbeat is not marked stalled,
+        even if it was created long ago.
+        """
+        now = datetime.now(UTC)
+
+        # Job created 2 hours ago, but heartbeat updated 5 minutes ago
+        db.save_job(
+            {
+                "id": "test-old-job-recent-hb",
+                "filename": "test.csv",
+                "created_at": (now - timedelta(hours=2)).isoformat(),
+                "status": "running",
+                "email_column": "email",
+                "mode": "mock",
+                "total_rows": 10000,
+                "last_heartbeat": (now - timedelta(minutes=5)).isoformat(),
+            }
+        )
+
+        monitor = JobMonitor()
+        marked_count = monitor.check_stalled_jobs_once()
+
+        # Should NOT be marked as stalled
+        assert marked_count == 0
+
+        job = db.get_job("test-old-job-recent-hb")
+        assert job["status"] == "running"
+
+    def test_job_state_includes_heartbeat_tracking(self, client: pytest.fixture) -> None:
+        """Test that job state includes heartbeat tracking fields."""
+        import app
+
+        csv_content = "email\ntest@example.com\n"
+        data = {"file": (io.BytesIO(csv_content.encode()), "test.csv")}
+
+        response = client.post("/verify", data=data, content_type="multipart/form-data")
+        job_id = response.json["job_id"]
+
+        # Check in-memory job state has heartbeat fields
+        with app.JOB_STATE_LOCK:
+            job_data = app.data.get(job_id, {})
+            if job_data:  # Job might have completed already
+                assert "last_heartbeat_mono" in job_data or job_data == {}
+                assert "last_heartbeat_utc" in job_data or job_data == {}
+
+        # Wait for completion
+        for _ in range(50):
+            response = client.get(f"/progress?job_id={job_id}")
+            if response.json.get("percent", 0) >= 100:
+                break
+            time.sleep(0.1)

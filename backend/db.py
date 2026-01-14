@@ -405,11 +405,17 @@ def count_jobs_since(since_date: str, status: str | None = None) -> int:
         conn.close()
 
 
-def update_job_heartbeat(job_id: str) -> None:
-    """Update job's last_heartbeat to current time."""
+def update_job_heartbeat(job_id: str, timestamp: str | None = None) -> None:
+    """
+    Update job's last_heartbeat.
+
+    Args:
+        job_id: The job ID to update
+        timestamp: Optional ISO timestamp. If None, uses current UTC time.
+    """
     conn = get_connection()
     try:
-        now = datetime.now(UTC).isoformat()
+        now = timestamp if timestamp else datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE jobs SET last_heartbeat = ? WHERE id = ?",
             (now, job_id),
