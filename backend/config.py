@@ -40,6 +40,10 @@ class Config:
     # Validator
     VALIDATOR_MODE: str = os.getenv("VALIDATOR_MODE", "real")  # 'real' or 'mock'
 
+    # Redis (for job state and RQ)
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    USE_WORKER_QUEUE: bool = os.getenv("USE_WORKER_QUEUE", "true").lower() in ("1", "true", "yes")
+
     # Upload limits
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "25"))
     MAX_CONTENT_LENGTH: int = MAX_UPLOAD_MB * 1024 * 1024  # Convert to bytes

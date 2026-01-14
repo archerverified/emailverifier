@@ -27,9 +27,20 @@ import catch_all_cache
 import csv_utils
 import db
 import dns_cache
+import job_state
 import rate_limiter
 import storage
 from config import Config
+
+# RQ imports (optional - graceful fallback if Redis unavailable)
+try:
+    from redis import Redis
+    from rq import Queue
+    RQ_AVAILABLE = True
+except ImportError:
+    RQ_AVAILABLE = False
+    Redis = None  # type: ignore
+    Queue = None  # type: ignore
 
 # Request ID context for structured logging
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
@@ -183,12 +194,26 @@ ROLE_BASED_PREFIXES = {"info", "support", "admin", "sales", "contact"}
 EMAIL_COLUMN_EXACT = {"email", "e-mail", "e_mail", "emailaddress", "email_address"}
 EMAIL_COLUMN_CONTAINS = {"email", "e-mail", "mail"}
 
-# Thread-safe job data storage with global RLock
-data: dict = {}
-JOB_STATE_LOCK = threading.RLock()  # Single global lock for all job state operations
+# Job state management (Redis or in-memory fallback)
+# This replaces the old in-memory dict for multi-worker support
+job_state_manager = job_state.get_job_state()
 
-# Backward compatibility alias (deprecated, use JOB_STATE_LOCK)
+# Legacy in-memory storage (kept for backward compatibility during transition)
+# Will be removed once all code uses job_state_manager
+data: dict = {}
+JOB_STATE_LOCK = threading.RLock()
 data_lock = JOB_STATE_LOCK
+
+# RQ Queue for background job processing
+rq_queue: Queue | None = None
+if RQ_AVAILABLE and Config.USE_WORKER_QUEUE and Config.REDIS_URL:
+    try:
+        redis_conn = Redis.from_url(Config.REDIS_URL)
+        redis_conn.ping()  # Test connection
+        rq_queue = Queue(connection=redis_conn, default_timeout=3600)
+        logger.info(f"RQ Queue initialized with Redis: {Config.REDIS_URL}")
+    except Exception as e:
+        logger.warning(f"RQ Queue initialization failed: {e}. Using inline processing.")
 
 
 # Request ID middleware
@@ -939,20 +964,35 @@ def verify() -> tuple[Response, int] | Response:
 
     job_id = str(uuid.uuid4())
     total = len(reader)
-
-    output = io.StringIO()
     fieldnames = list(reader[0].keys()) + ["status", "reason", "score", "risk_factors"]
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
 
     # Store original content bytes for persistence
     original_content = content.encode("utf-8")
 
+    # Initialize job state in Redis/memory
+    job_state_manager.create_job(job_id, {
+        "progress": 0,
+        "row": 0,
+        "processing_row": 0,
+        "total": total,
+        "log": "",
+        "cancel": False,
+        "filename": file.filename,
+        "job_name": job_name,
+        "email_field": email_field,
+        "summary": None,
+    })
+
+    # Also keep in legacy in-memory dict for inline processing fallback
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
     with JOB_STATE_LOCK:
         data[job_id] = {
             "progress": 0,
-            "row": 0,  # Completed rows (backward compat)
-            "processing_row": 0,  # Row currently being processed
+            "row": 0,
+            "processing_row": 0,
             "total": total,
             "log": "",
             "cancel": False,
@@ -966,7 +1006,6 @@ def verify() -> tuple[Response, int] | Response:
             "start_time": time.time(),
             "summary": None,
             "original_content": original_content,
-            # Time-based heartbeat tracking
             "last_heartbeat_mono": time.monotonic(),
             "last_heartbeat_utc": Config.now_utc().isoformat(),
         }
@@ -979,6 +1018,7 @@ def verify() -> tuple[Response, int] | Response:
             "file_name": file.filename,
             "row_count": total,
             "mode": Config.VALIDATOR_MODE,
+            "use_queue": bool(rq_queue),
         },
     )
 
@@ -997,6 +1037,22 @@ def verify() -> tuple[Response, int] | Response:
 
     # Save upload to disk
     storage.save_upload(job_id, original_content)
+
+    # Enqueue to RQ worker if available, otherwise process inline
+    if rq_queue and not Config.TESTING:
+        from worker import process_verification_job
+        rq_queue.enqueue(
+            process_verification_job,
+            job_id=job_id,
+            records=reader,
+            email_field=email_field,
+            filename=file.filename,
+            job_name=job_name,
+            fieldnames=fieldnames,
+            job_timeout=3600,  # 1 hour max
+        )
+        logger.info(f"Job {job_id} enqueued to RQ worker")
+        return jsonify({"job_id": job_id, "email_column": email_field, "queued": True})
 
     def run() -> None:
         start_time = time.time()
@@ -1159,24 +1215,43 @@ def progress() -> Response:
     """Get current progress of a verification job."""
     job_id = request.args.get("job_id")
 
-    # Check in-memory first (for running jobs)
-    with JOB_STATE_LOCK:
-        d = data.get(job_id, {})
-        if d:
-            response_data = {
-                "percent": d.get("progress", 0),
-                "row": d.get("row", 0),  # Completed rows (backward compat)
-                "processing_row": d.get("processing_row", 0),  # Row currently being processed
-                "total": d.get("total", 0),
-                "status": "running",
-            }
-            # Include summary when job is complete
-            if d.get("progress", 0) >= 100 and d.get("summary"):
-                response_data["summary"] = d["summary"]
-                response_data["status"] = "completed"
-            return jsonify(response_data)
+    # Check both Redis and in-memory, return the one with higher progress
+    redis_job = job_state_manager.get_job(job_id)
+    redis_progress = redis_job.get("progress", 0) if redis_job else -1
 
-    # Not in memory - check database for historical job
+    with JOB_STATE_LOCK:
+        memory_job = data.get(job_id, {})
+        memory_progress = memory_job.get("progress", 0) if memory_job else -1
+
+    # Use whichever source has higher progress (handles race conditions)
+    if redis_progress >= memory_progress and redis_job:
+        response_data = {
+            "percent": redis_job.get("progress", 0),
+            "row": redis_job.get("row", 0),
+            "processing_row": redis_job.get("processing_row", 0),
+            "total": redis_job.get("total", 0),
+            "status": "running",
+        }
+        if redis_job.get("progress", 0) >= 100:
+            response_data["status"] = "completed"
+        if redis_job.get("summary"):
+            response_data["summary"] = redis_job["summary"]
+        return jsonify(response_data)
+
+    if memory_progress >= 0 and memory_job:
+        response_data = {
+            "percent": memory_job.get("progress", 0),
+            "row": memory_job.get("row", 0),
+            "processing_row": memory_job.get("processing_row", 0),
+            "total": memory_job.get("total", 0),
+            "status": "running",
+        }
+        if memory_job.get("progress", 0) >= 100 and memory_job.get("summary"):
+            response_data["summary"] = memory_job["summary"]
+            response_data["status"] = "completed"
+        return jsonify(response_data)
+
+    # Not in memory/Redis - check database for historical job
     job = db.get_job(job_id)
     if not job:
         return jsonify({"percent": 0, "row": 0, "processing_row": 0, "total": 0, "error": "Job not found"})
@@ -1208,6 +1283,13 @@ def progress() -> Response:
 def log() -> Response:
     """Get the latest log message for a job."""
     job_id = request.args.get("job_id")
+    
+    # Check Redis first
+    redis_job = job_state_manager.get_job(job_id)
+    if redis_job:
+        return Response(redis_job.get("log", ""), mimetype="text/plain")
+    
+    # Fallback to legacy in-memory
     with JOB_STATE_LOCK:
         return Response(data.get(job_id, {}).get("log", ""), mimetype="text/plain")
 
@@ -1217,10 +1299,15 @@ def log() -> Response:
 def cancel() -> tuple[str, int]:
     """Cancel a running verification job."""
     job_id = request.args.get("job_id")
+    
+    # Cancel in Redis (for RQ workers)
+    job_state_manager.set_cancel(job_id)
+    
+    # Also cancel in legacy in-memory (for inline processing)
     with JOB_STATE_LOCK:
         if job_id in data:
             data[job_id]["cancel"] = True
-            # DB update happens in the run() thread when it detects cancel
+    
     return "", 204
 
 
@@ -1480,6 +1567,8 @@ def clear_memory_for_testing() -> None:
     global data
     with JOB_STATE_LOCK:
         data.clear()
+    # Also clear Redis job state
+    job_state_manager.clear_all()
 
 
 # Static file serving for frontend (used in Docker single-container deployment)

@@ -22,18 +22,39 @@ Complete guide for deploying the email verification backend to a production VPS.
 - Domain `validator.2ndimpression.co` pointed to VPS IP `76.13.27.113` (A record, not CNAME)
 - SSH access to VPS
 
-## Important: Gunicorn Workers
+## Architecture
 
-> **CRITICAL**: The default configuration uses `GUNICORN_WORKERS=1` (single worker).
->
-> **Do NOT increase workers** unless you move job state to a shared store (Redis/DB).
->
-> **Why**: Job progress and cancellation state are stored in per-process memory. Multiple workers cause requests to hit different processes, resulting in:
-> - Progress flipping between "Row 0" and actual progress
-> - Cancel requests not reaching the worker running the job
-> - Inconsistent job state in the UI
->
-> If you need more concurrency, increase `GUNICORN_THREADS` (default: 8) instead.
+The application now uses Redis for job state management and RQ for background job processing:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Caddy     │────▶│   Backend   │────▶│   Redis     │
+│ (HTTPS/TLS) │     │  (Gunicorn) │     │ (Job State) │
+└─────────────┘     └─────────────┘     └─────────────┘
+                           │                   ▲
+                           ▼                   │
+                    ┌─────────────┐            │
+                    │  RQ Worker  │────────────┘
+                    │ (Background)│
+                    └─────────────┘
+```
+
+**Components:**
+- **Caddy**: Reverse proxy with automatic HTTPS
+- **Backend**: Flask API (can now run multiple Gunicorn workers!)
+- **Redis**: Shared job state store and RQ queue backend
+- **Worker**: RQ worker for background email verification
+
+## Gunicorn Workers (Now Safe!)
+
+With Redis-based job state, you can now safely run multiple Gunicorn workers:
+
+```bash
+GUNICORN_WORKERS=2   # Recommended for production
+GUNICORN_THREADS=4   # Threads per worker
+```
+
+The default is now 2 workers with 4 threads each, providing good concurrency for the API while RQ workers handle the actual email verification.
 
 ## Recommended Production Settings
 
