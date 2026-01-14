@@ -883,6 +883,32 @@ def verify() -> tuple[Response, int] | Response:
         with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
             f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:881","message":"job created in worker memory","data":{"job_id":job_id,"worker_pid":os.getpid(),"total_rows":total},"timestamp":int(__import__('time').time()*1000)})+'\n')
         # #endregion
+    # #region agent log
+    # Secondary debug sink for Linux/Docker deployments (inside container volume).
+    # Do not log secrets (API keys, emails, etc).
+    try:
+        with open("/app/storage/debug.log", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H2",
+                        "location": "app.py:881",
+                        "message": "job created in worker memory (docker sink)",
+                        "data": {
+                            "job_id": job_id,
+                            "worker_pid": os.getpid(),
+                            "total_rows": total,
+                        },
+                        "timestamp": int(__import__("time").time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
         data[job_id] = {
             "progress": 0,
             "row": 0,
@@ -1010,6 +1036,33 @@ def verify() -> tuple[Response, int] | Response:
                     with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
                         f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1007","message":"progress updated in worker","data":{"job_id":job_id,"worker_pid":os.getpid(),"row":i,"percent":percent,"total":total},"timestamp":int(__import__('time').time()*1000)})+'\n')
                 # #endregion
+                # #region agent log
+                if i % 5 == 0:
+                    try:
+                        with open("/app/storage/debug.log", "a", encoding="utf-8") as f:
+                            f.write(
+                                json.dumps(
+                                    {
+                                        "sessionId": "debug-session",
+                                        "runId": "pre-fix",
+                                        "hypothesisId": "H2",
+                                        "location": "app.py:1007",
+                                        "message": "progress updated in worker (docker sink)",
+                                        "data": {
+                                            "job_id": job_id,
+                                            "worker_pid": os.getpid(),
+                                            "row": i,
+                                            "percent": percent,
+                                            "total": total,
+                                        },
+                                        "timestamp": int(__import__("time").time() * 1000),
+                                    }
+                                )
+                                + "\n"
+                            )
+                    except Exception:
+                        pass
+                # #endregion
                 data[job_id].update(
                     {
                         "progress": percent,
@@ -1090,6 +1143,33 @@ def progress() -> Response:
     with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
         f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1078","message":"progress endpoint called","data":{"job_id":job_id,"worker_pid":os.getpid(),"in_memory_jobs":list(data.keys())},"timestamp":int(__import__('time').time()*1000)})+'\n')
     # #endregion
+    # #region agent log
+    try:
+        with open("/app/storage/debug.log", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "debug-session",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H2",
+                        "location": "app.py:1088",
+                        "message": "progress endpoint called (docker sink)",
+                        "data": {
+                            "job_id": job_id,
+                            "worker_pid": os.getpid(),
+                            "gunicorn_workers_env": os.environ.get("GUNICORN_WORKERS"),
+                            "gunicorn_threads_env": os.environ.get("GUNICORN_THREADS"),
+                            "gunicorn_timeout_env": os.environ.get("GUNICORN_TIMEOUT"),
+                            "in_memory_jobs_count": len(data),
+                        },
+                        "timestamp": int(__import__("time").time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
 
     # Check in-memory first (for running jobs)
     with data_lock:
@@ -1098,6 +1178,32 @@ def progress() -> Response:
         import os, json
         with open(r'c:\Users\OxGh0\OneDrive\Desktop\Email Verifier Warp\Email Verifier Warp\.cursor\debug.log', 'a', encoding='utf-8') as f:
             f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"app.py:1080","message":"in-memory lookup result","data":{"job_id":job_id,"found_in_memory":bool(d),"row":d.get("row",0) if d else 0,"progress":d.get("progress",0) if d else 0,"worker_pid":os.getpid()},"timestamp":int(__import__('time').time()*1000)})+'\n')
+        # #endregion
+        # #region agent log
+        try:
+            with open("/app/storage/debug.log", "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "sessionId": "debug-session",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H2",
+                            "location": "app.py:1095",
+                            "message": "in-memory lookup result (docker sink)",
+                            "data": {
+                                "job_id": job_id,
+                                "found_in_memory": bool(d),
+                                "row": (d.get("row", 0) if d else 0),
+                                "progress": (d.get("progress", 0) if d else 0),
+                                "worker_pid": os.getpid(),
+                            },
+                            "timestamp": int(__import__("time").time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
         # #endregion
         if d:
             response_data = {
